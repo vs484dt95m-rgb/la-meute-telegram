@@ -16,14 +16,14 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Le bot La Meute Telegram est en ligne et actif !"
+    return "Le bot La Meute Telegram est en ligne et actif (toutes les 10 minutes) !"
 
 @app.route('/health')
 def health():
     return "OK", 200
 
 # -------------------------------------------------------------------
-# 1. SOURCES & FLUX RSS AVEC NOMS DE SOURCES CLairs
+# 1. SOURCES & FLUX RSS AVEC NOMS DE SOURCES CLAIRS
 # -------------------------------------------------------------------
 
 FLUX_RSS = {
@@ -62,11 +62,11 @@ def obtenir_emojis_par_sujet(titre, resume, nom_source):
         return "🔥✊⚡", "ACTUALITÉ POLITIQUE"
 
 # -------------------------------------------------------------------
-# 3. BOUCLE DE PUBLICATION (TOUTES LES 1 MINUTE)
+# 3. BOUCLE DE PUBLICATION (TOUTES LES 10 MINUTES)
 # -------------------------------------------------------------------
 
 def boucle_verification_flux():
-    logging.info("--- DÉMARRAGE DU THREAD DE PUBLICATION TELEGRAM ---")
+    logging.info("--- DÉMARRAGE DU THREAD DE PUBLICATION TELEGRAM (10 MIN) ---")
     time.sleep(5)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -179,8 +179,8 @@ def boucle_verification_flux():
         except Exception as e:
             logging.error(f"Erreur critique dans la boucle de publication : {e}")
 
-        # Attente d'exactement 1 minute (60 secondes)
-        time.sleep(60)
+        # Attente de 10 minutes (600 secondes)
+        time.sleep(600)
 
 # -------------------------------------------------------------------
 # 4. LANCEMENT AUTOMATIQUE DU THREAD AU CHARGEMENT DU MODULE
