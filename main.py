@@ -1,9 +1,11 @@
 import os
-import asyncio
+import threading
+import time
 import logging
 import feedparser
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
+import requests
+from flask import Flask
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 # Configuration des logs
 logging.basicConfig(
@@ -11,9 +13,29 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Initialisation de Flask (nécessaire pour Render / Web Service)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Le bot La Meute Telegram est en ligne et actif !"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
 # -------------------------------------------------------------------
 # 1. DICTIONNAIRES DE TOUTES LES SOURCES
 # -------------------------------------------------------------------
+
+FLUX_RSS = [
+    "https://lafranceinsoumise.fr/actualites/feed/",
+    "https://melenchon.fr/feed/",
+    "https://institutlaboetie.fr/feed/",
+    "https://linsoumission.fr/feed/",
+    "https://infos-ouvrieres.fr/feed/",
+    "https://www.lemediatv.fr/feed/"
+]
 
 SOURCES_WEB = {
     "LFI Actualités": "https://lafranceinsoumise.fr/actualites/",
@@ -26,15 +48,6 @@ SOURCES_WEB = {
     "Institut La Boétie": "https://institutlaboetie.fr",
     "Le Média TV": "https://www.lemediatv.fr"
 }
-
-FLUX_RSS = [
-    "https://lafranceinsoumise.fr/actualites/feed/",
-    "https://melenchon.fr/feed/",
-    "https://institutlaboetie.fr/feed/",
-    "https://linsoumission.fr/feed/",
-    "https://infos-ouvrieres.fr/feed/",
-    "https://www.lemediatv.fr/feed/"
-]
 
 SOURCES_YOUTUBE = {
     "Jean-Luc Mélenchon": "https://www.youtube.com/@JLMelenchon",
@@ -66,169 +79,91 @@ SOURCES_YOUTUBE = {
     "Leïla Chaibi": "https://www.youtube.com/@leilachaibi9050"
 }
 
-# Mémoire globale pour éviter les doublons (peut être relié à database.py)
 POSTS_DEJA_PUBLIES = set()
 
 # -------------------------------------------------------------------
-# 2. FONCTIONS DE PUBLICATION ET GESTION DES FLUX
+# 2. LOGIQUE DE PUBLICATION AUTOMATIQUE (TOUTES LES 10 MINUTES)
 # -------------------------------------------------------------------
 
-async def verifier_et_publier_flux(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Vérifie les flux RSS toutes les 10 minutes.
-    S'il y a du nouveau, publie l'article. 
-    Sinon, publie un message d'engagement Action Populaire.
-    """
-    chat_id = os.getenv("TELEGRAM_CHANNEL_ID") # ID de votre canal Telegram configuré dans Render
-    if not chat_id:
-        logging.warning("TELEGRAM_CHANNEL_ID non défini dans les variables d'environnement.")
-        return
-
-    nouveau_contenu_trouve = False
-
-    for url_rss in FLUX_RSS:
-        try:
-            feed = feedparser.parse(url_rss)
-            if feed.entries:
-                dernier_article = feed.entries[0] # Le plus récent
-                art_id = dernier_article.get("id", dernier_article.get("link"))
-                
-                if art_id not in POSTS_DEJA_PUBLIES:
-                    POSTS_DEJA_PUBLIES.add(art_id)
-                    nouveau_contenu_trouve = True
-                    
-                    titre = dernier_article.get("title", "Actualité")
-                    lien = dernier_article.get("link", "#")
-                    resume = dernier_article.get("summary", "Découvrez les dernières actualités.")
-                    # Nettoyage basique des balises HTML du résumé si présentes
-                    import re
-                    resume_propre = re.sub('<.*?>', '', resume)[:300] + "..."
-
-                    texte_pub = (
-                        f"📢 **NOUVELLE ACTUALITÉ**\n\n"
-                        f"📌 **{titre}**\n\n"
-                        f"📝 {resume_propre}\n\n"
-                        f"🔗 [Lire l'article complet]({lien})"
-                    )
-                    
-                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Lire sur le site", url=lien)]])
-                    
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=texte_pub,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard,
-                        disable_web_page_preview=False
-                    )
-                    break # On publie une nouveauté par cycle pour éviter le spam
-        except Exception as e:
-            logging.error(f"Erreur lors de la lecture du flux {url_rss}: {e}")
-
-    # Si rien de nouveau n'a été publié, on publie le message d'engagement
-    if not nouveau_contenu_trouve:
-        message_engagement = (
-            "✊ **Engagez-vous, rejoignez l'action populaire !**\n\n"
-            "Chaque action compte pour faire progresser nos idées, diffuser nos luttes et préparer l'avenir.\n\n"
-            "👉 Rejoignez le mouvement dès maintenant sur [actionpopulaire.fr](https://actionpopulaire.fr) !"
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=message_engagement,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Erreur envoi message engagement: {e}")
-
-async def envoyer_video_direct_format(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    titre: str,
-    miniature_url: str,
-    description_courte: str,
-    lien: str,
-    est_direct: bool = False
-):
-    """
-    Format spécifique pour les directs et rediffusions YouTube (Titre, Miniature, Texte, Lien).
-    """
-    type_badge = "🔴 **EN DIRECT**" if est_direct else "📺 **REDIFFUSION / VIDÉO**"
-    
-    caption = (
-        f"{type_badge}\n\n"
-        f"📌 **{titre}**\n\n"
-        f"📝 {description_courte}\n\n"
-        f"🔗 [Regarder sur YouTube]({lien})"
-    )
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ Voir la vidéo", url=lien)]
-    ])
-    
-    try:
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=miniature_url,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    except Exception:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=caption,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-
-# -------------------------------------------------------------------
-# 3. COMMANDES TELEGRAM CLASSIQUES
-# -------------------------------------------------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Le bot **La Meute Telegram** est opérationnel et surveille les flux RSS et sources.\n\n"
-        "Commandes disponibles :\n"
-        "• /sources : Liste des sites politiques\n"
-        "• /youtube : Liste des chaînes YouTube"
-    )
-
-async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📰 **Sources politiques et insoumises :**\n\n"
-    for name, url in SOURCES_WEB.items():
-        text += f"• [{name}]({url})\n"
-    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
-
-async def cmd_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🎥 **Chaînes YouTube suivies :**\n\n"
-    for name, url in SOURCES_YOUTUBE.items():
-        text += f"• [{name}]({url})\n"
-    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
-
-# -------------------------------------------------------------------
-# 4. INITIALISATION DU BOT ET DU TIMER (10 MINUTES)
-# -------------------------------------------------------------------
-
-def main():
+def boucle_verification_flux():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        logging.error("TELEGRAM_BOT_TOKEN manquant dans les variables d'environnement.")
+    chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    
+    if not token or not chat_id:
+        logging.error("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHANNEL_ID manquant.")
         return
 
-    application = Application.builder().token(token).build()
+    bot = Bot(token=token)
+    
+    while True:
+        try:
+            nouveau_contenu_trouve = False
+            
+            for url_rss in FLUX_RSS:
+                feed = feedparser.parse(url_rss)
+                if feed.entries:
+                    dernier_article = feed.entries[0]
+                    art_id = dernier_article.get("id", dernier_article.get("link"))
+                    
+                    if art_id not in POSTS_DEJA_PUBLIES:
+                        POSTS_DEJA_PUBLIES.add(art_id)
+                        nouveau_contenu_trouve = True
+                        
+                        titre = dernier_article.get("title", "Actualité")
+                        lien = dernier_article.get("link", "#")
+                        resume = dernier_article.get("summary", "Découvrez les dernières actualités.")
+                        
+                        import re
+                        resume_propre = re.sub('<.*?>', '', resume)[:300] + "..."
 
-    # Handlers des commandes
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("sources", cmd_sources))
-    application.add_handler(CommandHandler("youtube", cmd_youtube))
+                        texte_pub = (
+                            f"📢 **NOUVELLE ACTUALITÉ**\n\n"
+                            f"📌 **{titre}**\n\n"
+                            f"📝 {resume_propre}\n\n"
+                            f"🔗 [Lire l'article complet]({lien})"
+                        )
+                        
+                        # Utilisation de requests pour envoyer via l'API Telegram de façon synchrone
+                        url_api = f"https://api.telegram.org/bot{token}/sendMessage"
+                        payload = {
+                            "chat_id": chat_id,
+                            "text": texte_pub,
+                            "parse_mode": "Markdown",
+                            "disable_web_page_preview": False
+                        }
+                        requests.post(url_api, json=payload)
+                        break # Un post par cycle
 
-    # Configuration du JobQueue pour tourner toutes les 10 minutes (600 secondes)
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(verifier_et_publier_flux, interval=600, first=10)
+            # Si rien de nouveau, publication du message d'engagement Action Populaire
+            if not nouveau_contenu_trouve:
+                message_engagement = (
+                    "✊ **Engagez-vous, rejoignez l'action populaire !**\n\n"
+                    "Chaque action compte pour faire progresser nos idées, diffuser nos luttes et préparer l'avenir.\n\n"
+                    "👉 Rejoignez le mouvement dès maintenant sur [actionpopulaire.fr](https://actionpopulaire.fr) !"
+                )
+                url_api = f"https://api.telegram.org/bot{token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message_engagement,
+                    "parse_mode": "Markdown"
+                }
+                requests.post(url_api, json=payload)
 
-    # Lancement du bot
-    application.run_polling()
+        except Exception as e:
+            logging.error(f"Erreur dans la boucle de flux: {e}")
+
+        # Attente de 10 minutes (600 secondes)
+        time.sleep(600)
+
+# -------------------------------------------------------------------
+# 3. LANCEMENT DU THREAD DE FOND ET DE FLASK
+# -------------------------------------------------------------------
 
 if __name__ == '__main__':
-    main()
+    # Démarrage de la vérification des flux en arrière-plan
+    t = threading.Thread(target=boucle_verification_flux, daemon=True)
+    t.start()
+    
+    # Démarrage de Flask (requis pour Render avec Gunicorn)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
