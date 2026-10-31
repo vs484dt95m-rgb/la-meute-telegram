@@ -5,7 +5,7 @@ import logging
 import feedparser
 import requests
 from flask import Flask
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot
 
 # Configuration des logs
 logging.basicConfig(
@@ -13,19 +13,19 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Initialisation de Flask (nécessaire pour Render / Web Service)
+# Initialisation de Flask (obligatoire pour maintenir le service Web sur Render)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Le bot La Meute Telegram est en ligne et actif !"
+    return "Le bot La Meute Telegram est en ligne, actif et publie toutes les minutes !"
 
 @app.route('/health')
 def health():
     return "OK", 200
 
 # -------------------------------------------------------------------
-# 1. DICTIONNAIRES DE TOUTES LES SOURCES
+# 1. DICTIONNAIRES DE TOUTES LES SOURCES & FLUX RSS
 # -------------------------------------------------------------------
 
 FLUX_RSS = [
@@ -79,69 +79,126 @@ SOURCES_YOUTUBE = {
     "Leïla Chaibi": "https://www.youtube.com/@leilachaibi9050"
 }
 
+# Mémoire glissante pour éviter les doublons récents
 POSTS_DEJA_PUBLIES = set()
 
 # -------------------------------------------------------------------
-# 2. LOGIQUE DE PUBLICATION AUTOMATIQUE (TOUTES LES 10 MINUTES)
+# 2. DÉTECTION INTELLIGENTE DES ÉMOJIS & THÈMES DU SUJET
+# -------------------------------------------------------------------
+
+def obtenir_emojis_par_sujet(titre, resume, lien_rss):
+    texte = (titre + " " + resume).lower()
+    
+    if any(m in texte for m in ["2027", "présidentielle", "élection", "campagne", "vote", "urne"]):
+        return "🗳️🎯🇫🇷", "CAP VERS 2027"
+    elif any(m in texte for m in ["assemblée", "député", "loi", "motion", "gouvernement", "parlement", "amendement", "AN"]):
+        return "🏛️📜✊", "COMBAT À L'ASSEMBLÉE"
+    elif any(m in texte for m in ["grève", "salarié", "travail", "retraite", "inflation", "salaire", "pauvreté", "social", "ouvrier"]):
+        return "✊🏭💶", "LUTTES SOCIALES & POUVOIR D'ACHAT"
+    elif any(m in texte for m in ["climat", "écologie", "eau", "pollution", "nucléaire", "carbone", "biodiversité", "planète"]):
+        return "🌍🌱💧", "URGENCE ÉCOLOGIQUE"
+    elif any(m in texte for m in ["gaza", "palestine", "israël", "guerre", "paix", "international", "ue", "europe", "monde"]):
+        return "🌐🕊️🇵🇸", "GÉOPOLITIQUE & INTERNATIONAL"
+    elif "boetie" in lien_rss or any(m in texte for m in ["boétie", "formation", "livre", "conférence", "économie", "théorie"]):
+        return "📚💡🧠", "INSTITUT LA BOÉTIE & BATAILLE CULTURELLE"
+    elif "media" in lien_rss or any(m in texte for m in ["direct", "vidéo", "émission", "revue", "chronique"]):
+        return "📺🔴🎙️", "LE MÉDIA & DIRECTS"
+    elif "insoumission" in lien_rss or "franceinsoumise" in lien_rss:
+        return "🔥✊⚡", "L'INSOUMISSION"
+    else:
+        return "📢🇫🇷⚡", "ACTUALITÉ POLITIQUE"
+
+# -------------------------------------------------------------------
+# 3. BOUCLE DE PUBLICATION CONTINUE (TOUTES LES 1 MINUTE STRICTEMENT)
 # -------------------------------------------------------------------
 
 def boucle_verification_flux():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    invite_link = os.getenv("TELEGRAM_INVITE_LINK", "https://t.me/lameute_insoumise")
     
     if not token or not chat_id:
         logging.error("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHANNEL_ID manquant.")
         return
 
-    bot = Bot(token=token)
-    
+    url_api = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    # Boucle infinie assurant une publication toutes les 60 secondes (1 minute) non-stop
     while True:
         try:
-            nouveau_contenu_trouve = False
+            article_a_publier = None
+            source_rss_active = ""
             
+            # 1. Chercher en priorité un article totalement inédit
             for url_rss in FLUX_RSS:
                 feed = feedparser.parse(url_rss)
-                if feed.entries:
-                    dernier_article = feed.entries[0]
-                    art_id = dernier_article.get("id", dernier_article.get("link"))
-                    
+                for entry in feed.entries:
+                    art_id = entry.get("id", entry.get("link"))
                     if art_id not in POSTS_DEJA_PUBLIES:
-                        POSTS_DEJA_PUBLIES.add(art_id)
-                        nouveau_contenu_trouve = True
-                        
-                        titre = dernier_article.get("title", "Actualité")
-                        lien = dernier_article.get("link", "#")
-                        resume = dernier_article.get("summary", "Découvrez les dernières actualités.")
-                        
-                        import re
-                        resume_propre = re.sub('<.*?>', '', resume)[:300] + "..."
+                        article_a_publier = entry
+                        source_rss_active = url_rss
+                        break
+                if article_a_publier:
+                    break
 
-                        texte_pub = (
-                            f"📢 **NOUVELLE ACTUALITÉ**\n\n"
-                            f"📌 **{titre}**\n\n"
-                            f"📝 {resume_propre}\n\n"
-                            f"🔗 [Lire l'article complet]({lien})"
-                        )
+            # 2. S'il n'y a rien de neuf, on pioche dans les récents pour ne jamais s'arrêter
+            if not article_a_publier:
+                for url_rss in FLUX_RSS:
+                    feed = feedparser.parse(url_rss)
+                    for entry in feed.entries[:5]:
+                        art_id = entry.get("id", entry.get("link"))
+                        if len(POSTS_DEJA_PUBLIES) > 50:
+                            POSTS_DEJA_PUBLIES.clear()
                         
-                        # Utilisation de requests pour envoyer via l'API Telegram de façon synchrone
-                        url_api = f"https://api.telegram.org/bot{token}/sendMessage"
-                        payload = {
-                            "chat_id": chat_id,
-                            "text": texte_pub,
-                            "parse_mode": "Markdown",
-                            "disable_web_page_preview": False
-                        }
-                        requests.post(url_api, json=payload)
-                        break # Un post par cycle
+                        if art_id not in POSTS_DEJA_PUBLIES:
+                            article_a_publier = entry
+                            source_rss_active = url_rss
+                            break
+                    if article_a_publier:
+                        break
 
-            # Si rien de nouveau, publication du message d'engagement Action Populaire
-            if not nouveau_contenu_trouve:
-                message_engagement = (
-                    "✊ **Engagez-vous, rejoignez l'action populaire !**\n\n"
-                    "Chaque action compte pour faire progresser nos idées, diffuser nos luttes et préparer l'avenir.\n\n"
-                    "👉 Rejoignez le mouvement dès maintenant sur [actionpopulaire.fr](https://actionpopulaire.fr) !"
+            # 3. Publication de l'article avec émojis, résumé et CTA d'abonnement
+            if article_a_publier:
+                art_id = article_a_publier.get("id", article_a_publier.get("link"))
+                POSTS_DEJA_PUBLIES.add(art_id)
+                
+                titre = article_a_publier.get("title", "Actualité")
+                lien = article_a_publier.get("link", "#")
+                resume = article_a_publier.get("summary", "Découvrez les dernières actualités.")
+                
+                import re
+                resume_propre = re.sub('<.*?>', '', resume)[:250] + "..."
+
+                emojis, nom_theme = obtenir_emojis_par_sujet(titre, resume, source_rss_active)
+
+                texte_pub = (
+                    f"{emojis} **{nom_theme}**\n\n"
+                    f"📌 **{titre}**\n\n"
+                    f"📝 {resume_propre}\n\n"
+                    f"🔗 [Lire l'article complet]({lien})\n\n"
+                    f"───────────────────\n"
+                    f"🐺 **Fais grandir la meute, partage ce message !**\n"
+                    f"👉 [S'abonner au canal]({invite_link})"
                 )
-                url_api = f"https://api.telegram.org/bot{token}/sendMessage"
+                
+                payload = {
+                    "chat_id": chat_id,
+                    "text": texte_pub,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": False
+                }
+                requests.post(url_api, json=payload)
+
+            else:
+                # 4. Message de repli Action Populaire avec le même CTA
+                message_engagement = (
+                    "✊🔥 **Engagez-vous, rejoignez l'action populaire !**\n\n"
+                    "Chaque action compte pour faire progresser nos idées, diffuser nos luttes et préparer l'avenir.\n\n"
+                    "👉 Rejoignez le mouvement dès maintenant sur [actionpopulaire.fr](https://actionpopulaire.fr) !\n\n"
+                    f"───────────────────\n"
+                    f"🐺 **Fais grandir la meute, partage ce message !**\n"
+                    f"👉 [S'abonner au canal]({invite_link})"
+                )
                 payload = {
                     "chat_id": chat_id,
                     "text": message_engagement,
@@ -150,20 +207,18 @@ def boucle_verification_flux():
                 requests.post(url_api, json=payload)
 
         except Exception as e:
-            logging.error(f"Erreur dans la boucle de flux: {e}")
+            logging.error(f"Erreur dans la boucle de publication 1 min: {e}")
 
-        # Attente de 1 minutes (60 secondes)
+        # Pause exacte de 1 minute (60 secondes) avant le prochain post
         time.sleep(60)
 
 # -------------------------------------------------------------------
-# 3. LANCEMENT DU THREAD DE FOND ET DE FLASK
+# 4. DÉMARRAGE DU THREAD DE FOND & DU SERVEUR FLASK
 # -------------------------------------------------------------------
 
 if __name__ == '__main__':
-    # Démarrage de la vérification des flux en arrière-plan
     t = threading.Thread(target=boucle_verification_flux, daemon=True)
     t.start()
     
-    # Démarrage de Flask (requis pour Render avec Gunicorn)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
