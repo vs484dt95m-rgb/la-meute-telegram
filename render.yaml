@@ -1,0 +1,15 @@
+services:
+  - type: cron
+    name: la-meute-bot
+    runtime: python
+    plan: starter
+    schedule: "*/15 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
