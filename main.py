@@ -152,8 +152,8 @@ def boucle_verification_flux():
         except Exception as e:
             logging.error(f"Erreur dans la boucle de flux: {e}")
 
-        # Attente de 10 minutes (600 secondes)
-        time.sleep(600)
+        # Attente de 1 minutes (60 secondes)
+        time.sleep(60)
 
 # -------------------------------------------------------------------
 # 3. LANCEMENT DU THREAD DE FOND ET DE FLASK
